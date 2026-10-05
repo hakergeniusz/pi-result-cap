@@ -1,0 +1,30 @@
+{
+	"name": "pi-result-cap",
+	"version": "0.1.0",
+	"description": "Bounds every tool result at birth with head+tail truncation and a deterministic marker, so the prompt-cache prefix never diverges.",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"pi",
+		"pi-package",
+		"tool-result",
+		"truncation",
+		"prompt-cache"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/hakergeniusz/pi-result-cap.git"
+	},
+	"bugs": {
+		"url": "https://github.com/hakergeniusz/pi-result-cap/issues"
+	},
+	"homepage": "https://github.com/hakergeniusz/pi-result-cap#readme",
+	"pi": {
+		"extensions": [
+			"./result-cap.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	}
+}
