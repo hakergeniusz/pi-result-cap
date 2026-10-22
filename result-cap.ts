@@ -14,6 +14,18 @@ const TAIL_LINES = 72;
 const HEAD_BYTES = 13 * 1024;
 const TAIL_BYTES = 2 * 1024;
 
+/**
+ * Tools whose results are never capped.
+ *
+ * `read` bounds itself already (2000 lines / 50KB) and tells the model how to
+ * page with offset/limit. Trimming a read result drops the middle of the file
+ * from the context, and the model cannot get it back: read-guard blocks a
+ * re-read of a range it believes is already in context, so the trimmed lines
+ * are gone for good. A capped read destroys information instead of saving it,
+ * and the model is pushed to shell out to `sed` for the rest of the file.
+ */
+const UNCAPPED_TOOLS = new Set(["read"]);
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const byteLen = (s: string) => encoder.encode(s).length;
@@ -28,7 +40,7 @@ function byteSlice(text: string, startByte: number, endByte: number): string {
 	let s2 = s;
 	let e2 = e;
 	while (s2 < e2 && (b[s2] & 0xc0) === 0x80) s2++;
-	while (e2 > s2 && e2 < b.length && (b[e2] & 0xc0) === 0x80) e2--;
+	while (e2 > s2 && (b[e2] & 0xc0) === 0x80) e2--;
 	return decoder.decode(b.subarray(s2, e2));
 }
 
@@ -63,10 +75,50 @@ function capContent(content: unknown): unknown {
 	if (!Array.isArray(content)) return content;
 	return content.map((b) =>
 		b && typeof b === "object" && (b as Record<string, unknown>).type === "text" &&
-			typeof (b as Record<string, unknown>).text === "string"
+		typeof (b as Record<string, unknown>).text === "string"
 			? { ...(b as Record<string, unknown>), text: capToolText((b as Record<string, unknown>).text as string) }
 			: b,
 	);
+}
+
+/**
+ * Map every tool call id in the transcript to the tool that produced it, so a
+ * tool result can be recognised by name. Provider payloads carry the id, not
+ * the name, so the name has to come from the assistant turn that made the
+ * call.
+ */
+export function collectToolNames(messages: unknown[]): Map<string, string> {
+	const names = new Map<string, string>();
+	const addCalls = (calls: unknown) => {
+		if (!Array.isArray(calls)) return;
+		for (const tc of calls as Record<string, unknown>[]) {
+			const id = tc?.id;
+			const fn = tc?.function as Record<string, unknown> | undefined;
+			const name = typeof fn?.name === "string" ? fn.name : typeof tc?.name === "string" ? tc.name : undefined;
+			if (typeof id === "string" && name) names.set(id, name);
+		}
+	};
+	for (const m of messages) {
+		if (!m || typeof m !== "object") continue;
+		const msg = m as Record<string, unknown>;
+		// OpenAI-style assistant message: { tool_calls: [{ id, function: { name } }] }
+		addCalls(msg.tool_calls);
+		const content = msg.content;
+		if (!Array.isArray(content)) continue;
+		for (const b of content as Record<string, unknown>[]) {
+			if (!b || typeof b !== "object") continue;
+			// Anthropic-style assistant block: { type: "tool_use", id, name }
+			if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") {
+				names.set(b.id, b.name);
+			}
+			addCalls(b.tool_calls);
+		}
+	}
+	return names;
+}
+
+function isUncapped(name: string | undefined): boolean {
+	return name !== undefined && UNCAPPED_TOOLS.has(name);
 }
 
 export default function (pi: any) {
@@ -74,16 +126,24 @@ export default function (pi: any) {
 		try {
 			const payload = event?.payload as Record<string, unknown> | undefined;
 			if (!payload || !Array.isArray(payload.messages)) return;
-			for (const m of payload.messages) {
+			const messages = payload.messages;
+			const toolNames = collectToolNames(messages);
+			for (const m of messages) {
 				if (!m || typeof m !== "object") continue;
 				const msg = m as Record<string, unknown>;
 				if (msg.role === "tool") {
 					// OpenAI-style tool message
+					const id = typeof msg.tool_call_id === "string" ? msg.tool_call_id : undefined;
+					const name = typeof msg.name === "string" ? msg.name : id ? toolNames.get(id) : undefined;
+					if (isUncapped(name)) continue;
 					msg.content = capContent(msg.content);
 				} else if (Array.isArray(msg.content)) {
 					// Anthropic-style tool_result blocks riding in any message
 					for (const b of msg.content as Record<string, unknown>[]) {
 						if (b && typeof b === "object" && b.type === "tool_result") {
+							const id = typeof b.tool_use_id === "string" ? b.tool_use_id : undefined;
+							const name = id ? toolNames.get(id) : undefined;
+							if (isUncapped(name)) continue;
 							b.content = capContent(b.content);
 						}
 					}

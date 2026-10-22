@@ -42,7 +42,25 @@ between passes, breaking cache stability.
 Handles both OpenAI-style `role: "tool"` messages and Anthropic-style
 `tool_result` blocks inside any message.
 
+## `read` results are never capped
+
+`read` bounds itself already (2000 lines / 50KB) and tells the model how to
+page with `offset/limit`. Trimming a read result drops the middle of the file
+from the context, and the model cannot get it back: [read-guard](https://github.com/hakergeniusz/pi-read-guard)
+refuses to re-read a range it believes is already in context, so the trimmed
+lines are gone for good. The model is then pushed to shell out to `sed` for the
+rest of the file.
+
+A capped read destroys information instead of saving it, so read results pass
+through untouched. Every other tool is capped as before.
+
 ## Failure mode
 
 Fail-open. On any error the payload goes out exactly as pi built it. A cap bug
 must never break a request.
+
+## Test
+
+```bash
+bun test result-cap.test.ts
+```
